@@ -1418,8 +1418,9 @@ function loadTesseract() {
 
 // The game UI is light text on a near-black panel, which OCR reads poorly.
 // Upscale, grayscale, invert, then stretch the contrast so text is solid
-// black on white. Thresholds picked against the game's palette: gold names
-// and white timestamps land below 140 after inverting, panel chrome above 190.
+// black on white. Thresholds tuned against a real cap: the dimmed
+// next-spawn line is the faintest text (~155 after inverting) and must land
+// black, while the darkest panel chrome (~205) must land white.
 function preprocessForOcr(img) {
   var scale = Math.max(1, Math.min(3, 1600 / img.width));
   var c = document.createElement("canvas");
@@ -1430,7 +1431,7 @@ function preprocessForOcr(img) {
   var d = ctx.getImageData(0, 0, c.width, c.height), p = d.data;
   for (var i = 0; i < p.length; i += 4) {
     var g = 255 - (0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]);
-    g = g < 140 ? 0 : g > 190 ? 255 : g;
+    g = g < 175 ? 0 : g > 205 ? 255 : g;
     p[i] = p[i + 1] = p[i + 2] = g;
   }
   ctx.putImageData(d, 0, 0);
@@ -1742,6 +1743,31 @@ Promise.all([store.get("bosses_teon2b"), store.get("settings")]).then(function (
   tick();
   setInterval(tick, 1000);
 });
+
+/* =========================================================================
+   13. AUTO-UPDATE
+   The guild keeps this tab open for days, so poll for new deploys: every
+   2 minutes compare the page's ETag and reload when it changes. The reload
+   is skipped while a dialog is open or a time is being typed, so an update
+   never eats work in progress -- the next poll catches up. Timers live in
+   localStorage and survive the reload untouched.
+   ========================================================================= */
+var pageVersionTag = null;
+function checkForNewVersion() {
+  fetch(location.pathname, { method: "HEAD", cache: "no-store" }).then(function (r) {
+    var tag = r.headers.get("etag") || r.headers.get("last-modified");
+    if (!tag) return;
+    if (pageVersionTag === null) { pageVersionTag = tag; return; }
+    if (tag === pageVersionTag) return;
+    if (document.querySelector(".backdrop.open") || isEditingLastDeath) return;
+    location.reload();
+  }).catch(function () { /* offline or file:// -- try again next poll */ });
+}
+if (location.protocol !== "file:") {
+  checkForNewVersion();
+  setInterval(checkForNewVersion, 2 * 60 * 1000);
+}
+window.__checkVersion = checkForNewVersion;
 
 });
 </script>
