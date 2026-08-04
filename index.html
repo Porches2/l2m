@@ -81,6 +81,7 @@ body{
 .btn:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
 .btn-primary{background:var(--brass);color:#191500;border-color:var(--brass);font-weight:600}
 .btn-primary:hover{background:#dbb32e;border-color:#dbb32e}
+.btn:disabled{opacity:.4;cursor:default;pointer-events:none}
 .btn-kill{border-color:#2f5d3a;color:#8fdc9f}
 .btn-kill:hover{background:#1c2e22;border-color:var(--check)}
 .btn-miss{border-color:#5d3232;color:#e39ba1}
@@ -179,6 +180,20 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
 .err{color:var(--overdue);font-size:12px;min-height:16px;margin-top:2px}
 
 /* ---------- toasts ---------- */
+/* ---------- scan log ---------- */
+.scan-drop{border:1px dashed var(--line);border-radius:var(--radius);padding:26px 14px;
+  text-align:center;color:var(--muted);font-size:13px;cursor:pointer;user-select:none}
+.scan-drop.drag,.scan-drop:hover{border-color:var(--brass);color:var(--text)}
+.scan-rows{margin-top:12px;max-height:40vh;overflow:auto}
+.scan-row{display:flex;align-items:center;gap:9px;padding:7px 10px;margin-top:6px;
+  border:1px solid var(--line-soft);border-radius:var(--radius);font-size:13px}
+.scan-row input{accent-color:var(--brass);width:15px;height:15px;flex:none}
+.scan-row .name{font-weight:600}
+.scan-row .when{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--muted)}
+.scan-row .gap{font-size:11px;color:var(--check);flex:none}
+.scan-row.warn{border-color:var(--overdue)}
+.scan-row.warn .gap{color:var(--overdue)}
+
 .toasts{position:fixed;top:14px;right:14px;display:flex;flex-direction:column;
   gap:8px;z-index:80;max-width:300px}
 .toast{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--brass);
@@ -220,6 +235,7 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
       <button data-server="all" aria-pressed="true">All</button>
     </div>
     <div class="spacer"></div>
+    <button class="btn" id="btnScan">Scan log</button>
     <button class="btn" id="btnIO">Import / export</button>
     <button class="btn" id="btnSettings">Alerts</button>
     <button class="btn btn-primary" id="btnAdd">Add boss</button>
@@ -360,6 +376,26 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
       <button class="btn" id="sTest">Test sound</button>
       <button class="btn" data-close="settingsBackdrop">Close</button>
       <button class="btn btn-primary" id="sSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- scan boss log screenshot -->
+<div class="backdrop" id="scanBackdrop">
+  <div class="modal" style="max-width:640px" role="dialog" aria-modal="true" aria-labelledby="scanTitle">
+    <h2 id="scanTitle">Scan boss log</h2>
+    <p class="hint">Cap the in-game boss log and drop the screenshot here — kill times are read
+      straight off the image. Pasting (Cmd+V) works too. Nothing is applied until you confirm below.</p>
+    <div class="scan-drop" id="scanDrop" role="button" tabindex="0">
+      Drop a screenshot, paste, or click to browse
+      <input type="file" id="scanFile" accept="image/*" hidden />
+    </div>
+    <div class="scan-rows" id="scanRows"></div>
+    <div class="err" id="scanErr"></div>
+    <div class="ok" id="scanOk"></div>
+    <div class="modal-acts">
+      <button class="btn" data-close="scanBackdrop">Close</button>
+      <button class="btn btn-primary" id="scanApply" disabled>Apply</button>
     </div>
   </div>
 </div>
@@ -1290,6 +1326,268 @@ document.getElementById("ioImport").addEventListener("click", function () {
   okEl.textContent = "Imported " + bosses.length + " bosses · " + withImg + " with images" +
                      (noCd ? " · " + noCd + " missing a cooldown" : "");
 });
+
+/* =========================================================================
+   11.5 SCAN LOG  (boss-log screenshot -> kill times)
+   ========================================================================= */
+// OCR runs entirely in the browser (tesseract.js); the engine is only fetched
+// from the CDN the first time a screenshot is scanned, so the page stays light.
+var TESSERACT_SRC = "https://cdn.jsdelivr.net/npm/tesseract.js@4.1.4/dist/tesseract.min.js";
+var scanParsed = [];
+
+function loadTesseract() {
+  if (window.Tesseract) return Promise.resolve();
+  return new Promise(function (res, rej) {
+    var s = document.createElement("script");
+    s.src = TESSERACT_SRC;
+    s.onload = res;
+    s.onerror = function () { rej(new Error("Could not load the OCR engine — check your connection.")); };
+    document.head.appendChild(s);
+  });
+}
+
+// The game UI is light text on a near-black panel, which OCR reads poorly.
+// Upscale, grayscale, invert, then stretch the contrast so text is solid
+// black on white. Thresholds picked against the game's palette: gold names
+// and white timestamps land below 140 after inverting, panel chrome above 190.
+function preprocessForOcr(img) {
+  var scale = Math.max(1, Math.min(3, 1600 / img.width));
+  var c = document.createElement("canvas");
+  c.width = Math.round(img.width * scale);
+  c.height = Math.round(img.height * scale);
+  var ctx = c.getContext("2d");
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  var d = ctx.getImageData(0, 0, c.width, c.height), p = d.data;
+  for (var i = 0; i < p.length; i += 4) {
+    var g = 255 - (0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2]);
+    g = g < 140 ? 0 : g > 190 ? 255 : g;
+    p[i] = p[i + 1] = p[i + 2] = g;
+  }
+  ctx.putImageData(d, 0, 0);
+  return c;
+}
+
+function levDist(a, b) {
+  if (a === b) return 0;
+  var m = a.length, n = b.length, row = [], i, j;
+  for (j = 0; j <= n; j++) row[j] = j;
+  for (i = 1; i <= m; i++) {
+    var prev = row[0]; row[0] = i;
+    for (j = 1; j <= n; j++) {
+      var cur = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+  }
+  return row[n];
+}
+
+function normOcrText(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z ]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// OCR text is noisy, so names match fuzzily: exact substring first, then a
+// sliding token window within edit distance 1 (2 for names of 6+ letters).
+function matchBossName(text) {
+  var t = normOcrText(text);
+  if (!t) return null;
+  var tokens = t.split(" ");
+  var best = null, bestScore = 99;
+  bosses.forEach(function (b) {
+    var n = normOcrText(b.name);
+    if (!n) return;
+    if (t.indexOf(n) !== -1 && bestScore > 0) { best = b; bestScore = 0; return; }
+    var parts = n.split(" ");
+    for (var i = 0; i + parts.length <= tokens.length; i++) {
+      var win = tokens.slice(i, i + parts.length).join(" ");
+      if (Math.abs(win.length - n.length) > 2) continue;
+      var d = levDist(win, n);
+      if (d <= (n.length >= 6 ? 2 : 1) && d < bestScore) { best = b; bestScore = d; }
+    }
+  });
+  return best;
+}
+
+// Each log row shows two stacked timestamps: kill time on top, next respawn
+// under it. Pair every recognised boss name with the timestamps nearest to it
+// vertically; the earlier one is the kill. The respawn line is used purely as
+// a cross-check: (respawn - kill) must equal the boss's cooldown, which
+// catches OCR misreads before they touch a timer.
+var SCAN_TS_RE = /(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(\d{1,2})[:.](\d{2})/g;
+
+function parseBossLog(ocr) {
+  var lines = ocr.lines || [];
+  var stamps = [], names = [];
+  lines.forEach(function (ln) {
+    var y = (ln.bbox.y0 + ln.bbox.y1) / 2;
+    var m; SCAN_TS_RE.lastIndex = 0;
+    while ((m = SCAN_TS_RE.exec(ln.text || ""))) {
+      var dt = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], 0, 0);
+      if (!isNaN(dt.getTime())) stamps.push({ date: dt, y: y });
+    }
+    var b = matchBossName(ln.text);
+    if (b) names.push({ boss: b, y: y });
+  });
+  if (!names.length || !stamps.length) return [];
+
+  // Row tolerance from the layout itself: names are one per row, so the
+  // median gap between consecutive names is the row height.
+  var rowTol = 60;
+  if (names.length > 1) {
+    var gaps = [];
+    names.slice(1).forEach(function (n, i) { gaps.push(Math.abs(n.y - names[i].y)); });
+    gaps.sort(function (a, b) { return a - b; });
+    rowTol = Math.max(30, gaps[Math.floor(gaps.length / 2)] * 0.55);
+  }
+
+  var seen = {}, out = [];
+  names.forEach(function (n) {
+    if (seen[n.boss.id]) return;
+    var near = stamps.filter(function (s) { return Math.abs(s.y - n.y) <= rowTol; })
+                     .sort(function (a, b) { return a.date - b.date; });
+    if (!near.length) return;
+    seen[n.boss.id] = true;
+    var kill = near[0].date;
+    var respawn = near.length > 1 ? near[near.length - 1].date : null;
+    var gapH = respawn ? (respawn - kill) / 36e5 : null;
+    var gapOk = gapH === null ? null : Math.abs(gapH - n.boss.cooldownHours) < 0.26;
+    var future = kill.getTime() > Date.now() + 6e4;
+    out.push({ boss: n.boss, kill: kill, gapH: gapH, gapOk: gapOk, future: future });
+  });
+  return out;
+}
+
+function fmtScanWhen(d) {
+  return String(d.getMonth() + 1).padStart(2, "0") + "/" + String(d.getDate()).padStart(2, "0") +
+         " " + formatTime(d);
+}
+
+function renderScanResults() {
+  var box = document.getElementById("scanRows");
+  box.innerHTML = "";
+  scanParsed.forEach(function (r, i) {
+    var bad = r.gapOk === false || r.future;
+    var note = r.future ? "&#9888; kill time is in the future"
+             : r.gapOk === false ? "&#9888; " + (Math.round(r.gapH * 10) / 10) + "h gap &ne; " + r.boss.cooldownHours + "h CD"
+             : r.gapOk === true ? "gap matches " + r.boss.cooldownHours + "h CD &#10003;"
+             : "no respawn line to cross-check";
+    var row = document.createElement("label");
+    row.className = "scan-row" + (bad ? " warn" : "");
+    row.innerHTML =
+      '<input type="checkbox" data-i="' + i + '"' + (bad ? "" : " checked") + " /> " +
+      '<span class="name">' + esc(r.boss.name) + "</span>" +
+      '<span class="gap">' + note + "</span>" +
+      '<span class="when">killed ' + esc(fmtScanWhen(r.kill)) + "</span>";
+    box.appendChild(row);
+  });
+  document.getElementById("scanApply").disabled = !scanParsed.length;
+}
+
+function setScanStatus(msg, isErr) {
+  document.getElementById("scanErr").textContent = isErr ? msg : "";
+  document.getElementById("scanOk").textContent = isErr ? "" : msg;
+}
+
+function runScan(img) {
+  setScanStatus("Reading screenshot…");
+  document.getElementById("scanRows").innerHTML = "";
+  scanParsed = [];
+  document.getElementById("scanApply").disabled = true;
+  loadTesseract()
+    .then(function () {
+      return Tesseract.recognize(preprocessForOcr(img), "eng", {
+        logger: function (m) {
+          if (m.status === "recognizing text") {
+            setScanStatus("Reading screenshot… " + Math.round(m.progress * 100) + "%");
+          }
+        }
+      });
+    })
+    .then(function (out) {
+      scanParsed = parseBossLog(out.data);
+      if (!scanParsed.length) {
+        setScanStatus("No boss names with timestamps found. Crop tighter around the log rows and try again.", true);
+        return;
+      }
+      var flagged = scanParsed.filter(function (r) { return r.gapOk === false || r.future; }).length;
+      setScanStatus("Found " + scanParsed.length + " kill" + (scanParsed.length === 1 ? "" : "s") + "." +
+        (flagged ? " " + flagged + " look" + (flagged === 1 ? "s" : "") + " wrong and " +
+                   (flagged === 1 ? "is" : "are") + " unticked — check before applying." : ""));
+      renderScanResults();
+    })
+    .catch(function (e) { setScanStatus(e.message || String(e), true); });
+}
+
+function scanImageFile(file) {
+  if (!file || file.type.indexOf("image/") !== 0) {
+    setScanStatus("That is not an image file.", true);
+    return;
+  }
+  var url = URL.createObjectURL(file);
+  var img = new Image();
+  img.onload = function () { URL.revokeObjectURL(url); runScan(img); };
+  img.onerror = function () { URL.revokeObjectURL(url); setScanStatus("Could not read that image.", true); };
+  img.src = url;
+}
+
+var scanDrop = document.getElementById("scanDrop");
+var scanFile = document.getElementById("scanFile");
+
+document.getElementById("btnScan").addEventListener("click", function () {
+  scanParsed = [];
+  document.getElementById("scanRows").innerHTML = "";
+  document.getElementById("scanApply").disabled = true;
+  setScanStatus("");
+  open("scanBackdrop");
+});
+
+scanDrop.addEventListener("click", function () { scanFile.click(); });
+scanDrop.addEventListener("keydown", function (e) {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); scanFile.click(); }
+});
+scanFile.addEventListener("change", function () {
+  if (scanFile.files[0]) scanImageFile(scanFile.files[0]);
+  scanFile.value = "";
+});
+["dragover", "dragenter"].forEach(function (ev) {
+  scanDrop.addEventListener(ev, function (e) { e.preventDefault(); scanDrop.classList.add("drag"); });
+});
+["dragleave", "drop"].forEach(function (ev) {
+  scanDrop.addEventListener(ev, function (e) { e.preventDefault(); scanDrop.classList.remove("drag"); });
+});
+scanDrop.addEventListener("drop", function (e) {
+  var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) scanImageFile(f);
+});
+document.addEventListener("paste", function (e) {
+  if (!document.getElementById("scanBackdrop").classList.contains("open")) return;
+  var items = (e.clipboardData || {}).items || [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type.indexOf("image/") === 0) {
+      scanImageFile(items[i].getAsFile());
+      e.preventDefault();
+      return;
+    }
+  }
+});
+
+document.getElementById("scanApply").addEventListener("click", function () {
+  var boxes = document.querySelectorAll("#scanRows input[type=checkbox]");
+  var applied = 0;
+  boxes.forEach(function (cb) {
+    if (!cb.checked) return;
+    var r = scanParsed[+cb.dataset.i];
+    if (!r) return;
+    setDeath(r.boss, r.kill);
+    applied++;
+  });
+  if (!applied) { setScanStatus("Nothing ticked — nothing applied.", true); return; }
+  close("scanBackdrop");
+  pushToast("Log scanned", applied + " timer" + (applied === 1 ? "" : "s") + " updated from the boss log");
+});
+
+// exposed for automated testing of the parse pipeline
+window.__scanTest = { parseBossLog: parseBossLog, matchBossName: matchBossName, runScan: runScan };
 
 /* =========================================================================
    12. BOOT
