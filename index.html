@@ -362,6 +362,15 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
     <label class="check"><input type="checkbox" id="sSoonToCheck" /> Alert when a boss is ready to check</label>
     <label class="check"><input type="checkbox" id="sAny" /> Alert on every status change</label>
     <div class="field" style="margin-top:14px">
+      <label for="sSoundName">Alert sound</label>
+      <select id="sSoundName">
+        <option value="horn">War horn</option>
+        <option value="chime">Chime</option>
+        <option value="bell">Bell</option>
+        <option value="ping">Ping</option>
+      </select>
+    </div>
+    <div class="field">
       <label for="sRepeat">Repeat the sound</label>
       <select id="sRepeat">
         <option value="1">Once</option><option value="2">2×</option>
@@ -413,7 +422,8 @@ var isEditingLastDeath = false;   // pause re-render while a time input is focus
 var activeServer = "all";
 
 var settings = {
-  soonLeadMinutes: 15,
+  soonLeadMinutes: 5,
+  soundName: "horn",
   alertOnCooldownToSoon: true,
   alertOnSoonToCheck: true,
   alertOnAnyStatusChange: false,
@@ -787,22 +797,73 @@ function pushToast(title, body) {
 }
 
 var audioCtx = null;
+
+// Each alert sound is a small WebAudio synth patch. Synthesized on purpose:
+// no audio files to host, nothing extra to download, works offline.
+var ALERT_SOUNDS = {
+  // low brassy swell -- reads as "boss incoming" without being shrill
+  horn: function (ctx) {
+    var t0 = ctx.currentTime;
+    var lp = ctx.createBiquadFilter();
+    lp.type = "lowpass"; lp.frequency.value = 900; lp.Q.value = 1.2;
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.32, t0 + 0.16);
+    g.gain.setValueAtTime(0.32, t0 + 0.45);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.85);
+    lp.connect(g); g.connect(ctx.destination);
+    [146.8, 148.0, 220.0].forEach(function (f) {   // detuned D3 pair + A3
+      var o = ctx.createOscillator();
+      o.type = "sawtooth"; o.frequency.value = f;
+      o.connect(lp); o.start(t0); o.stop(t0 + 0.9);
+    });
+  },
+  // the original two-note triangle blip
+  chime: function (ctx) {
+    [0, 0.18].forEach(function (offset, i) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "triangle";
+      o.frequency.value = i === 0 ? 880 : 1170;
+      var t = ctx.currentTime + offset;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.28, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t); o.stop(t + 0.18);
+    });
+  },
+  // struck bell: fundamental plus two decaying partials
+  bell: function (ctx) {
+    var t0 = ctx.currentTime;
+    [[660, 0.3, 1.1], [1320, 0.12, 0.7], [1976, 0.06, 0.45]].forEach(function (p) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine"; o.frequency.value = p[0];
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(p[1], t0 + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + p[2]);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t0); o.stop(t0 + p[2] + 0.05);
+    });
+  },
+  // single short high note, the quietest option
+  ping: function (ctx) {
+    var t0 = ctx.currentTime;
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 1318.5;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.3, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.35);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t0); o.stop(t0 + 0.4);
+  }
+};
+
 function playAlertSound() {
   if (!settings.sound) return;
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === "suspended") audioCtx.resume();
-    [0, 0.18].forEach(function (offset, i) {
-      var o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      o.type = "triangle";
-      o.frequency.value = i === 0 ? 880 : 1170;
-      var t = audioCtx.currentTime + offset;
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.28, t + 0.015);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-      o.connect(g); g.connect(audioCtx.destination);
-      o.start(t); o.stop(t + 0.18);
-    });
+    (ALERT_SOUNDS[settings.soundName] || ALERT_SOUNDS.horn)(audioCtx);
   } catch (e) { /* audio unavailable */ }
 }
 
@@ -1176,6 +1237,7 @@ document.getElementById("btnSettings").addEventListener("click", function () {
   document.getElementById("sCdToSoon").checked  = settings.alertOnCooldownToSoon;
   document.getElementById("sSoonToCheck").checked = settings.alertOnSoonToCheck;
   document.getElementById("sAny").checked       = settings.alertOnAnyStatusChange;
+  document.getElementById("sSoundName").value   = ALERT_SOUNDS[settings.soundName] ? settings.soundName : "horn";
   document.getElementById("sRepeat").value      = settings.alertRepeatCount;
   document.getElementById("sImages").checked    = settings.showImages;
   document.getElementById("sSound").checked     = settings.sound;
@@ -1189,6 +1251,7 @@ document.getElementById("sSave").addEventListener("click", function () {
   settings.alertOnCooldownToSoon = document.getElementById("sCdToSoon").checked;
   settings.alertOnSoonToCheck    = document.getElementById("sSoonToCheck").checked;
   settings.alertOnAnyStatusChange= document.getElementById("sAny").checked;
+  settings.soundName             = document.getElementById("sSoundName").value;
   settings.alertRepeatCount      = parseInt(document.getElementById("sRepeat").value, 10) || 1;
   settings.showImages            = document.getElementById("sImages").checked;
   settings.sound                 = document.getElementById("sSound").checked;
@@ -1201,7 +1264,9 @@ document.getElementById("sSave").addEventListener("click", function () {
 });
 
 document.getElementById("sTest").addEventListener("click", function () {
+  // test what's currently picked in the dialog, saved or not
   settings.sound = document.getElementById("sSound").checked;
+  settings.soundName = document.getElementById("sSoundName").value;
   playAlertSound();
 });
 
@@ -1618,7 +1683,18 @@ window.__scanTest = { parseBossLog: parseBossLog, matchBossName: matchBossName, 
    12. BOOT
    ========================================================================= */
 Promise.all([store.get("bosses_teon2b"), store.get("settings")]).then(function (res) {
-  try { if (res[1]) Object.assign(settings, JSON.parse(res[1])); } catch (e) {}
+  try {
+    if (res[1]) {
+      var savedSettings = JSON.parse(res[1]);
+      Object.assign(settings, savedSettings);
+      // Settings saved before the sound picker existed also predate the
+      // 5-minute lead default: migrate the old 15-minute default once.
+      // Any other value was chosen on purpose and is kept.
+      if (!savedSettings.soundName && savedSettings.soonLeadMinutes === 15) {
+        settings.soonLeadMinutes = 5;
+      }
+    }
+  } catch (e) {}
 
   var loaded = null;
   try { if (res[0]) loaded = JSON.parse(res[0]); } catch (e) {}
