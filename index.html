@@ -1450,9 +1450,26 @@ function parseBossLog(ocr) {
     var kill = near[0].date;
     var respawn = near.length > 1 ? near[near.length - 1].date : null;
     var gapH = respawn ? (respawn - kill) / 36e5 : null;
-    var gapOk = gapH === null ? null : Math.abs(gapH - n.boss.cooldownHours) < 0.26;
+    var cd = n.boss.cooldownHours;
+
+    // The game always shows next spawn = kill + n x cooldown. n = 1 is a
+    // confirmed kill; n > 1 means the boss failed to spawn n-1 windows and
+    // the game rolled the clock, so the timer should sync to the log's next
+    // spawn -- the same thing the Miss button does, but read off the cap.
+    var windows = null, consistent = null;
+    if (gapH !== null && cd > 0) {
+      windows = Math.round(gapH / cd);
+      consistent = windows >= 1 && Math.abs(gapH - windows * cd) < 0.26;
+    }
     var future = kill.getTime() > Date.now() + 6e4;
-    out.push({ boss: n.boss, kill: kill, gapH: gapH, gapOk: gapOk, future: future });
+    var applyDate = (consistent && windows > 1)
+      ? new Date(respawn.getTime() - cd * 36e5)
+      : kill;
+    var already = !!n.boss.deathISO &&
+      Math.abs(new Date(n.boss.deathISO).getTime() - applyDate.getTime()) < 6e4;
+    out.push({ boss: n.boss, kill: kill, respawn: respawn, gapH: gapH,
+               windows: windows, consistent: consistent, future: future,
+               applyDate: applyDate, already: already });
   });
   return out;
 }
@@ -1466,18 +1483,23 @@ function renderScanResults() {
   var box = document.getElementById("scanRows");
   box.innerHTML = "";
   scanParsed.forEach(function (r, i) {
-    var bad = r.gapOk === false || r.future;
+    var bad = r.consistent === false || r.future;
     var note = r.future ? "&#9888; kill time is in the future"
-             : r.gapOk === false ? "&#9888; " + (Math.round(r.gapH * 10) / 10) + "h gap &ne; " + r.boss.cooldownHours + "h CD"
-             : r.gapOk === true ? "gap matches " + r.boss.cooldownHours + "h CD &#10003;"
+             : r.consistent === false ? "&#9888; " + (Math.round(r.gapH * 10) / 10) + "h gap doesn't fit " + r.boss.cooldownHours + "h CD"
+             : r.already ? "already up to date"
+             : r.windows > 1 ? (r.windows - 1) + " missed window" + (r.windows > 2 ? "s" : "") + " &mdash; syncing to the log"
+             : r.consistent === true ? "gap matches " + r.boss.cooldownHours + "h CD &#10003;"
              : "no respawn line to cross-check";
+    var when = (r.windows > 1 && r.respawn)
+      ? "next spawn " + esc(fmtScanWhen(r.respawn))
+      : "killed " + esc(fmtScanWhen(r.kill));
     var row = document.createElement("label");
     row.className = "scan-row" + (bad ? " warn" : "");
     row.innerHTML =
-      '<input type="checkbox" data-i="' + i + '"' + (bad ? "" : " checked") + " /> " +
+      '<input type="checkbox" data-i="' + i + '"' + (bad || r.already ? "" : " checked") + " /> " +
       '<span class="name">' + esc(r.boss.name) + "</span>" +
       '<span class="gap">' + note + "</span>" +
-      '<span class="when">killed ' + esc(fmtScanWhen(r.kill)) + "</span>";
+      '<span class="when">' + when + "</span>";
     box.appendChild(row);
   });
   document.getElementById("scanApply").disabled = !scanParsed.length;
@@ -1509,8 +1531,11 @@ function runScan(img) {
         setScanStatus("No boss names with timestamps found. Crop tighter around the log rows and try again.", true);
         return;
       }
-      var flagged = scanParsed.filter(function (r) { return r.gapOk === false || r.future; }).length;
-      setScanStatus("Found " + scanParsed.length + " kill" + (scanParsed.length === 1 ? "" : "s") + "." +
+      var flagged = scanParsed.filter(function (r) { return r.consistent === false || r.future; }).length;
+      var current = scanParsed.filter(function (r) { return r.already && r.consistent !== false && !r.future; }).length;
+      setScanStatus("Found " + scanParsed.length + " boss" + (scanParsed.length === 1 ? "" : "es") + "." +
+        (current ? " " + current + " already match" + (current === 1 ? "es" : "") + " and " +
+                   (current === 1 ? "is" : "are") + " unticked." : "") +
         (flagged ? " " + flagged + " look" + (flagged === 1 ? "s" : "") + " wrong and " +
                    (flagged === 1 ? "is" : "are") + " unticked — check before applying." : ""));
       renderScanResults();
@@ -1578,7 +1603,7 @@ document.getElementById("scanApply").addEventListener("click", function () {
     if (!cb.checked) return;
     var r = scanParsed[+cb.dataset.i];
     if (!r) return;
-    setDeath(r.boss, r.kill);
+    setDeath(r.boss, r.applyDate);
     applied++;
   });
   if (!applied) { setScanStatus("Nothing ticked — nothing applied.", true); return; }
