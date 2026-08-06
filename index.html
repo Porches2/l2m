@@ -959,8 +959,11 @@ function render() {
 
     var acts = '<div class="acts">';
     if (b.active) {
+      // Chance bosses (33/50%) often simply fail to appear -- for those the
+      // roll-forward button says what actually happened. Same action either way.
+      var missLabel = b.spawnChance && b.spawnChance < 100 ? "No spawn" : "Miss";
       acts += '<button class="btn btn-xs btn-kill" data-action="kill" data-id="' + b.id + '">Kill</button>' +
-              '<button class="btn btn-xs btn-miss" data-action="miss" data-id="' + b.id + '">Miss</button>';
+              '<button class="btn btn-xs btn-miss" data-action="miss" data-id="' + b.id + '">' + missLabel + "</button>";
     }
     acts += '<button class="btn btn-xs" data-action="edit" data-id="' + b.id + '" aria-label="Edit ' + esc(b.name) + '">Edit</button>' +
             '<button class="btn btn-xs" data-action="toggle" data-id="' + b.id + '">' +
@@ -1084,11 +1087,13 @@ function onTableClick(e) {
       break;
 
     case "miss":
-      // Window passed, nobody saw it. Roll the clock forward one cooldown
-      // from the respawn we just missed rather than from now.
+      // Window passed without a kill -- either the chance boss didn't spawn
+      // or nobody saw it. Roll the clock forward one cooldown from the
+      // respawn we just missed rather than from now.
       if (!b.nextRespawnDate) return;
       setDeath(b, new Date(b.nextRespawnDate.getTime()));
-      pushToast("Window skipped", b.name + " · next at " + formatTime(b.nextRespawnDate));
+      pushToast(b.spawnChance && b.spawnChance < 100 ? "No spawn" : "Window skipped",
+        b.name + " · next window at " + formatTime(b.nextRespawnDate));
       break;
 
     case "edit":
