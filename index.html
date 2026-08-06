@@ -1625,7 +1625,10 @@ function matchBossName(text) {
 // vertically; the earlier one is the kill. The respawn line is used purely as
 // a cross-check: (respawn - kill) must equal the boss's cooldown, which
 // catches OCR misreads before they touch a timer.
-var SCAN_TS_RE = /(\d{4})[\/.\-](\d{1,2})[\/.\-](\d{1,2})\s*(\d{1,2})[:.](\d{2})/g;
+// OCR mangles punctuation freely -- '2026;08}06 2024' is a real read of
+// '2026/08/06 20:24' -- so separators are any non-digit and the time colon
+// is optional; the field values themselves are range-checked instead.
+var SCAN_TS_RE = /(\d{4})[^\d\s] ?(\d{1,2})[^\d\s] ?(\d{1,2})\s+(\d{1,2})[:.]?(\d{2})\b/g;
 
 function parseBossLog(ocr) {
   var lines = ocr.lines || [];
@@ -1634,13 +1637,15 @@ function parseBossLog(ocr) {
     var y = (ln.bbox.y0 + ln.bbox.y1) / 2;
     var m; SCAN_TS_RE.lastIndex = 0;
     while ((m = SCAN_TS_RE.exec(ln.text || ""))) {
-      var dt = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], 0, 0);
+      var mo = +m[2], day = +m[3], hh = +m[4], mm = +m[5];
+      if (mo < 1 || mo > 12 || day < 1 || day > 31 || hh > 23 || mm > 59) continue;
+      var dt = new Date(+m[1], mo - 1, day, hh, mm, 0, 0);
       if (!isNaN(dt.getTime())) stamps.push({ date: dt, y: y });
     }
     var b = matchBossName(ln.text);
     if (b) names.push({ boss: b, y: y });
   });
-  if (!names.length || !stamps.length) return [];
+  if (!names.length || !stamps.length) return { found: [], orphanRows: 0 };
 
   // Row tolerance from the layout itself: names are one per row, so the
   // median gap between consecutive names is the row height.
@@ -1660,12 +1665,21 @@ function parseBossLog(ocr) {
     if (!near.length) return;
     seen[n.boss.id] = true;
     var kill = near[0].date;
-    // both OCR passes may report the same stamp; a respawn is only real if
-    // it's meaningfully later than the kill
+    // OCR may report the same stamp twice; a respawn is only real if it's
+    // meaningfully later than the kill
     var last = near[near.length - 1].date;
     var respawn = last - kill > 6e4 ? last : null;
-    var gapH = respawn ? (respawn - kill) / 36e5 : null;
     var cd = n.boss.cooldownHours;
+
+    // A lone stamp in the future is the next-spawn line -- the kill line was
+    // unreadable -- so walk it back one cooldown to recover the kill time.
+    var derived = false;
+    if (!respawn && cd > 0 && kill.getTime() > Date.now() + 12e4) {
+      respawn = kill;
+      kill = new Date(respawn.getTime() - cd * 36e5);
+      derived = true;
+    }
+    var gapH = respawn && !derived ? (respawn - kill) / 36e5 : null;
 
     // The game always shows next spawn = kill + n x cooldown. n = 1 is a
     // confirmed kill; n > 1 means the boss failed to spawn n-1 windows and
@@ -1684,9 +1698,21 @@ function parseBossLog(ocr) {
       Math.abs(new Date(n.boss.deathISO).getTime() - applyDate.getTime()) < 6e4;
     out.push({ boss: n.boss, kill: kill, respawn: respawn, gapH: gapH,
                windows: windows, consistent: consistent, future: future,
-               applyDate: applyDate, already: already });
+               derived: derived, applyDate: applyDate, already: already });
   });
-  return out;
+
+  // timestamp clusters with no readable name nearby -- report rather than
+  // silently drop, so a mangled row is a known miss the user can fix by hand
+  var orphans = stamps.filter(function (s) {
+    return !names.some(function (n) { return Math.abs(s.y - n.y) <= rowTol; });
+  }).sort(function (a, b) { return a.y - b.y; });
+  var orphanRows = 0, lastY = -1e9;
+  orphans.forEach(function (s) {
+    if (s.y - lastY > rowTol) orphanRows++;
+    lastY = s.y;
+  });
+
+  return { found: out, orphanRows: orphanRows };
 }
 
 function fmtScanWhen(d) {
@@ -1702,6 +1728,7 @@ function renderScanResults() {
     var note = r.future ? "&#9888; kill time is in the future"
              : r.consistent === false ? "&#9888; " + (Math.round(r.gapH * 10) / 10) + "h gap doesn't fit " + r.boss.cooldownHours + "h CD"
              : r.already ? "already up to date"
+             : r.derived ? "worked back from next spawn " + esc(formatTime(r.respawn))
              : r.windows > 1 ? (r.windows - 1) + " missed window" + (r.windows > 2 ? "s" : "") + " &mdash; syncing to the log"
              : r.consistent === true ? "gap matches " + r.boss.cooldownHours + "h CD &#10003;"
              : "no respawn line to cross-check";
@@ -1741,7 +1768,8 @@ function runScan(img) {
       });
     })
     .then(function (out) {
-      scanParsed = parseBossLog(out.data);
+      var result = parseBossLog(out.data);
+      scanParsed = result.found;
       if (!scanParsed.length) {
         setScanStatus("No boss names with timestamps found. Crop tighter around the log rows and try again.", true);
         return;
@@ -1752,7 +1780,9 @@ function runScan(img) {
         (current ? " " + current + " already match" + (current === 1 ? "es" : "") + " and " +
                    (current === 1 ? "is" : "are") + " unticked." : "") +
         (flagged ? " " + flagged + " look" + (flagged === 1 ? "s" : "") + " wrong and " +
-                   (flagged === 1 ? "is" : "are") + " unticked — check before applying." : ""));
+                   (flagged === 1 ? "is" : "are") + " unticked — check before applying." : "") +
+        (result.orphanRows ? " " + result.orphanRows + " row" + (result.orphanRows === 1 ? " has" : "s have") +
+                   " times but no readable boss name — set those by hand or re-crop." : ""));
       renderScanResults();
     })
     .catch(function (e) { setScanStatus(e.message || String(e), true); });
