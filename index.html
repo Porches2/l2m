@@ -103,6 +103,10 @@ body{
 .menu button{display:block;width:100%;text-align:left;background:none;border:0;
   color:var(--text);font:inherit;font-size:12px;padding:7px 10px;border-radius:4px;cursor:pointer}
 .menu button:hover{background:var(--ink)}
+.sync-pill{margin-top:4px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  text-align:right;color:var(--muted)}
+.sync-pill.ok{color:var(--check)}
+.sync-pill.err{color:var(--overdue)}
 .seg{display:flex;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
 .seg button{font:inherit;font-size:12px;background:transparent;color:var(--muted);
   border:0;padding:7px 12px;cursor:pointer}
@@ -234,6 +238,7 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
     <div class="clock">
       <div class="clock-time mono" id="clockTime">--:--:--</div>
       <div class="clock-date" id="clockDate">Local time</div>
+      <div class="sync-pill" id="syncPill" hidden></div>
     </div>
   </header>
 
@@ -397,6 +402,13 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
     <label class="check"><input type="checkbox" id="sSound" /> Play a sound</label>
     <label class="check"><input type="checkbox" id="sPopup" /> Show an in-page popup</label>
     <label class="check"><input type="checkbox" id="sDesktop" /> Show a desktop notification</label>
+    <div class="field" style="margin-top:14px">
+      <label for="sSyncKey">Guild sync passcode</label>
+      <input type="text" id="sSyncKey" autocomplete="off" spellcheck="false"
+             placeholder="Empty = timers stay on this device only" />
+    </div>
+    <p class="hint" style="margin:-6px 0 10px">Everyone who enters the same passcode shares one
+      set of timers — a Kill logged by one member updates the whole guild within seconds.</p>
     <div class="modal-acts">
       <button class="btn" id="sTest">Test sound</button>
       <button class="btn" data-close="settingsBackdrop">Close</button>
@@ -440,6 +452,7 @@ var activeServer = "all";
 var settings = {
   soonLeadMinutes: 5,
   soundName: "horn",
+  syncKey: "",
   alertOnCooldownToSoon: true,
   alertOnSoonToCheck: true,
   alertOnAnyStatusChange: false,
@@ -1082,9 +1095,11 @@ function setDeath(b, date) {
   b.deathISO = date.toISOString();
   b.lastDeathStr = formatTime(date);
   b._lastStatusCode = null;          // re-arm alerts for the new cycle
+  b.updatedAt = Date.now();
   computeNextRespawn(b);
   saveBosses();
   render();
+  schedulePush();
 }
 
 function onTableClick(e) {
@@ -1122,8 +1137,10 @@ function onTableClick(e) {
     case "toggle":
       b.active = !b.active;
       b._lastStatusCode = null;
+      b.updatedAt = Date.now();
       saveBosses();
       render();
+      schedulePush();
       break;
   }
 }
@@ -1159,8 +1176,10 @@ rowMenu.addEventListener("click", function (e) {
   if (item.dataset.menu === "edit") { openBossModal(b); return; }
   b.active = !b.active;
   b._lastStatusCode = null;
+  b.updatedAt = Date.now();
   saveBosses();
   render();
+  schedulePush();
 });
 document.addEventListener("click", function (e) {
   if (!rowMenu.classList.contains("open")) return;
@@ -1290,12 +1309,13 @@ document.getElementById("bossSave").addEventListener("click", function () {
     var b = findBoss(editingId);
     Object.keys(payload).forEach(function (k) { b[k] = payload[k]; });
     b._lastStatusCode = null;
-    b.updatedAt = new Date().toISOString();
+    b.updatedAt = Date.now();
   } else {
     payload.id = "b_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     payload.active = true;
     payload.lastDeathStr = "";
     payload.createdAt = new Date().toISOString();
+    payload.updatedAt = Date.now();
     payload.nextRespawnDate = null;
     bosses.push(payload);
   }
@@ -1303,6 +1323,7 @@ document.getElementById("bossSave").addEventListener("click", function () {
   saveBosses();
   close("bossBackdrop");
   render();
+  schedulePush();
 });
 
 /* settings */
@@ -1317,6 +1338,7 @@ document.getElementById("btnSettings").addEventListener("click", function () {
   document.getElementById("sSound").checked     = settings.sound;
   document.getElementById("sPopup").checked     = settings.popup;
   document.getElementById("sDesktop").checked   = settings.desktop;
+  document.getElementById("sSyncKey").value     = settings.syncKey || "";
   open("settingsBackdrop");
 });
 
@@ -1331,10 +1353,14 @@ document.getElementById("sSave").addEventListener("click", function () {
   settings.sound                 = document.getElementById("sSound").checked;
   settings.popup                 = document.getElementById("sPopup").checked;
   settings.desktop               = document.getElementById("sDesktop").checked;
+  var newSyncKey = document.getElementById("sSyncKey").value.trim();
+  var syncKeyChanged = newSyncKey !== (settings.syncKey || "");
+  settings.syncKey = newSyncKey;
   if (settings.desktop) desktopNotify("Alerts on", "Desktop notifications are enabled.");
   saveSettings();
   close("settingsBackdrop");
   render();
+  if (syncKeyChanged) syncNow();
 });
 
 document.getElementById("sTest").addEventListener("click", function () {
@@ -1437,10 +1463,11 @@ document.getElementById("ioImport").addEventListener("click", function () {
                  (!wantServer || (b.server || "").trim().toLowerCase() === wantServer);
         });
         if (!matched.length) { miss.push(parts[0]); return; }
-        matched.forEach(function (b) { b.imageUrl = parsed[key]; hit++; });
+        matched.forEach(function (b) { b.imageUrl = parsed[key]; b.updatedAt = Date.now(); hit++; });
       });
       saveBosses();
       render();
+      schedulePush();
       okEl.textContent = "Attached images to " + hit + " rows." +
         (miss.length ? " No match for: " + miss.slice(0, 5).join(", ") +
                        (miss.length > 5 ? " (+" + (miss.length - 5) + " more)" : "") : "");
@@ -1457,8 +1484,11 @@ document.getElementById("ioImport").addEventListener("click", function () {
   if (!parsed.length) { errEl.textContent = "That array is empty."; return; }
 
   bosses = parsed.map(normalizeImported);
+  var importStamp = Date.now();
+  bosses.forEach(function (b) { if (!b.updatedAt) b.updatedAt = importStamp; });
   saveBosses();
   render();
+  schedulePush();
 
   var withImg = bosses.filter(function (b) { return !!b.imageUrl; }).length;
   var noCd    = bosses.filter(function (b) { return !b.cooldownHours; }).length;
@@ -1837,6 +1867,133 @@ if (location.protocol !== "file:") {
   setInterval(checkForNewVersion, 2 * 60 * 1000);
 }
 window.__checkVersion = checkForNewVersion;
+
+/* =========================================================================
+   14. GUILD SYNC
+   One shared roster in Vercel Blob behind api/state. Every device polls it
+   and pushes its own changes; merging is per-boss last-write-wins on
+   updatedAt (client here, and again server-side), so simultaneous updates
+   from two phones can't erase each other. No passcode = local-only, exactly
+   as before.
+   ========================================================================= */
+var SYNC_POLL_MS = 10000;
+var SYNC_KEYS = ["name", "server", "cooldownHours", "description", "spawnChance",
+                 "important", "imageUrl", "active", "deathISO", "updatedAt"];
+var syncPushTimer = null;
+var syncBusy = false;
+
+function syncEnabled() {
+  return !!(settings.syncKey && settings.syncKey.trim()) && location.protocol !== "file:";
+}
+
+// updatedAt was briefly written as an ISO string; read both forms forever
+// so old saved rosters keep merging correctly.
+function ts(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") { var p = Date.parse(v); return isNaN(p) ? 0 : p; }
+  return 0;
+}
+
+function setSyncPill(state, msg) {
+  var el = document.getElementById("syncPill");
+  if (!syncEnabled()) { el.hidden = true; return; }
+  el.hidden = false;
+  el.className = "sync-pill" + (state ? " " + state : "");
+  el.textContent = msg;
+}
+
+function syncFields(b) {
+  var out = {};
+  out.id = b.id;
+  SYNC_KEYS.forEach(function (k) { if (b[k] !== undefined) out[k] = b[k]; });
+  out.updatedAt = ts(b.updatedAt);
+  return out;
+}
+
+function applyRemote(remote) {
+  if (!Array.isArray(remote)) return;
+  var byId = {};
+  bosses.forEach(function (b) { byId[b.id] = b; });
+  var changed = false, needPush = false, remoteIds = {};
+  remote.forEach(function (r) {
+    if (!r || !r.id) return;
+    remoteIds[r.id] = true;
+    var l = byId[r.id];
+    if (!l) {
+      var nb = Object.assign({ id: r.id }, r);
+      nb._lastStatusCode = null;
+      bosses.push(nb);
+      changed = true;
+      return;
+    }
+    if (ts(r.updatedAt) > ts(l.updatedAt)) {
+      SYNC_KEYS.forEach(function (k) { if (r[k] !== undefined) l[k] = r[k]; });
+      l._lastStatusCode = null;
+      changed = true;
+    } else if (ts(l.updatedAt) > ts(r.updatedAt)) {
+      needPush = true;    // we know something the server doesn't yet
+    }
+  });
+  bosses.forEach(function (b) { if (!remoteIds[b.id]) needPush = true; });
+  if (changed) {
+    saveBosses();
+    // don't redraw under an open dialog or menu; the next tick catches up
+    if (!document.querySelector(".backdrop.open") && !rowMenu.classList.contains("open")) render();
+  }
+  if (needPush) schedulePush();
+}
+
+function pollState() {
+  if (!syncEnabled() || !bosses.length) return;
+  fetch("api/state", { headers: { "x-guild-key": settings.syncKey }, cache: "no-store" })
+    .then(function (r) {
+      if (r.status === 401) throw new Error("Wrong passcode");
+      if (!r.ok) throw new Error("Sync error (" + r.status + ")");
+      return r.json();
+    })
+    .then(function (s) {
+      applyRemote(s.bosses || []);
+      setSyncPill("ok", "guild sync on");
+    })
+    .catch(function (e) { setSyncPill("err", e.message || "sync error"); });
+}
+
+function pushState() {
+  if (!syncEnabled() || !bosses.length || syncBusy) return;
+  syncBusy = true;
+  fetch("api/state", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-guild-key": settings.syncKey },
+    body: JSON.stringify({ bosses: bosses.map(syncFields) })
+  })
+    .then(function (r) {
+      if (r.status === 401) throw new Error("Wrong passcode");
+      if (!r.ok) throw new Error("Sync error (" + r.status + ")");
+      return r.json();
+    })
+    .then(function (s) {
+      syncBusy = false;
+      applyRemote(s.bosses || []);
+      setSyncPill("ok", "guild sync on");
+    })
+    .catch(function (e) { syncBusy = false; setSyncPill("err", e.message || "sync error"); });
+}
+
+function schedulePush() {
+  if (!syncEnabled()) return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(pushState, 800);
+}
+
+function syncNow() {
+  setSyncPill("", "connecting…");
+  pollState();
+  setTimeout(pushState, 1500);
+}
+
+setInterval(pollState, SYNC_POLL_MS);
+document.addEventListener("visibilitychange", function () { if (!document.hidden) pollState(); });
+setTimeout(function () { if (syncEnabled()) syncNow(); }, 2000);   // after boot has loaded bosses
 
 });
 </script>
