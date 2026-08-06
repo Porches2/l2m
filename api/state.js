@@ -70,7 +70,7 @@ export default async function handler(req, res) {
       updatedAt: Date.now(),
     };
     await put(STATE_PATH, JSON.stringify(state), {
-      access: 'public',
+      access: 'private',
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: 'application/json',
