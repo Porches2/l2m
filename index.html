@@ -94,6 +94,15 @@ body{
 .btn-miss{border-color:#5d3232;color:#e39ba1}
 .btn-miss:hover{background:#2e1c1e;border-color:var(--overdue)}
 .btn-xs{padding:4px 8px;font-size:11px}
+.btn-kebab{padding:4px 5px}
+.btn-kebab svg{width:14px;height:14px;opacity:.7}
+.menu{position:fixed;z-index:80;display:none;min-width:110px;padding:4px;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:0 10px 28px rgba(0,0,0,.5)}
+.menu.open{display:block}
+.menu button{display:block;width:100%;text-align:left;background:none;border:0;
+  color:var(--text);font:inherit;font-size:12px;padding:7px 10px;border-radius:4px;cursor:pointer}
+.menu button:hover{background:var(--ink)}
 .seg{display:flex;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
 .seg button{font:inherit;font-size:12px;background:transparent;color:var(--muted);
   border:0;padding:7px 12px;cursor:pointer}
@@ -959,15 +968,19 @@ function render() {
 
     var acts = '<div class="acts">';
     if (b.active) {
-      // Chance bosses (33/50%) often simply fail to appear -- for those the
-      // roll-forward button says what actually happened. Same action either way.
-      var missLabel = b.spawnChance && b.spawnChance < 100 ? "No spawn" : "Miss";
-      acts += '<button class="btn btn-xs btn-kill" data-action="kill" data-id="' + b.id + '">Kill</button>' +
-              '<button class="btn btn-xs btn-miss" data-action="miss" data-id="' + b.id + '">' + missLabel + "</button>";
+      acts += '<button class="btn btn-xs btn-kill" data-action="kill" data-id="' + b.id + '">Kill</button>';
+      // Chance bosses (33/50%) can fail to appear -- "No spawn" records that,
+      // "Miss" records nobody checking. Both roll forward one window.
+      if (b.spawnChance && b.spawnChance < 100) {
+        acts += '<button class="btn btn-xs btn-miss" data-action="nospawn" data-id="' + b.id + '">No spawn</button>';
+      }
+      acts += '<button class="btn btn-xs btn-miss" data-action="miss" data-id="' + b.id + '">Miss</button>';
     }
-    acts += '<button class="btn btn-xs" data-action="edit" data-id="' + b.id + '" aria-label="Edit ' + esc(b.name) + '">Edit</button>' +
-            '<button class="btn btn-xs" data-action="toggle" data-id="' + b.id + '">' +
-            (b.active ? "Archive" : "Restore") + "</button></div>";
+    acts += '<button class="btn btn-xs btn-kebab" data-action="menu" data-id="' + b.id + '"' +
+            ' aria-label="More actions for ' + esc(b.name) + '" aria-haspopup="menu">' +
+            '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+            '<circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/>' +
+            "</svg></button></div>";
 
     var rowClass = st.code === "soon" ? "row-soon"
                  : st.code === "check" ? "row-check"
@@ -1054,7 +1067,8 @@ function tick() {
   document.getElementById("clockDate").textContent =
     now.toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short" });
 
-  if (!isEditingLastDeath && !document.querySelector(".backdrop.open")) render();
+  if (!isEditingLastDeath && !document.querySelector(".backdrop.open") &&
+      !(typeof rowMenu !== "undefined" && rowMenu.classList.contains("open"))) render();
 }
 
 /* =========================================================================
@@ -1086,14 +1100,19 @@ function onTableClick(e) {
       pushToast("Timer started", b.name + " · back at " + formatTime(b.nextRespawnDate));
       break;
 
+    case "nospawn":
     case "miss":
       // Window passed without a kill -- either the chance boss didn't spawn
-      // or nobody saw it. Roll the clock forward one cooldown from the
+      // or nobody checked. Both roll the clock forward one cooldown from the
       // respawn we just missed rather than from now.
       if (!b.nextRespawnDate) return;
       setDeath(b, new Date(b.nextRespawnDate.getTime()));
-      pushToast(b.spawnChance && b.spawnChance < 100 ? "No spawn" : "Window skipped",
+      pushToast(btn.dataset.action === "nospawn" ? "No spawn" : "Window skipped",
         b.name + " · next window at " + formatTime(b.nextRespawnDate));
+      break;
+
+    case "menu":
+      openRowMenu(btn, b);
       break;
 
     case "edit":
@@ -1108,6 +1127,49 @@ function onTableClick(e) {
       break;
   }
 }
+
+// Kebab menu: one floating element for the whole table, repositioned to the
+// button that opened it. Lives outside the table so the 1-second re-render
+// can't wipe it -- tick() also skips render while it is open.
+var rowMenu = document.createElement("div");
+rowMenu.className = "menu";
+rowMenu.setAttribute("role", "menu");
+document.body.appendChild(rowMenu);
+var rowMenuFor = null;
+
+function openRowMenu(anchor, b) {
+  if (rowMenuFor === b.id && rowMenu.classList.contains("open")) { closeRowMenu(); return; }
+  rowMenuFor = b.id;
+  rowMenu.innerHTML =
+    '<button data-menu="edit" role="menuitem">Edit</button>' +
+    '<button data-menu="toggle" role="menuitem">' + (b.active ? "Archive" : "Restore") + "</button>";
+  rowMenu.classList.add("open");
+  var r = anchor.getBoundingClientRect();
+  rowMenu.style.top = (r.bottom + 4) + "px";
+  rowMenu.style.left = Math.max(8, r.right - rowMenu.offsetWidth) + "px";
+}
+function closeRowMenu() { rowMenu.classList.remove("open"); rowMenuFor = null; }
+
+rowMenu.addEventListener("click", function (e) {
+  var item = e.target.closest("button[data-menu]");
+  if (!item) return;
+  var b = findBoss(rowMenuFor);
+  closeRowMenu();
+  if (!b) return;
+  if (item.dataset.menu === "edit") { openBossModal(b); return; }
+  b.active = !b.active;
+  b._lastStatusCode = null;
+  saveBosses();
+  render();
+});
+document.addEventListener("click", function (e) {
+  if (!rowMenu.classList.contains("open")) return;
+  if (e.target.closest(".menu") || e.target.closest('[data-action="menu"]')) return;
+  closeRowMenu();
+});
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeRowMenu(); });
+window.addEventListener("scroll", closeRowMenu, true);
+window.addEventListener("resize", closeRowMenu);
 activeBody.addEventListener("click", onTableClick);
 inactiveBody.addEventListener("click", onTableClick);
 
