@@ -1839,7 +1839,12 @@ Promise.all([store.get("bosses_teon2b"), store.get("settings")]).then(function (
   });
   if (portraitsChanged) saveBosses();
 
-  bosses.forEach(function (b) { b._lastStatusCode = null; });
+  bosses.forEach(function (b) {
+    b._lastStatusCode = null;
+    // Kills logged before sync existed have no updatedAt; derive one from
+    // the kill time so they still win the merge against untouched seeds.
+    if (!b.updatedAt && b.deathISO) b.updatedAt = Date.parse(b.deathISO) || 0;
+  });
   tick();
   setInterval(tick, 1000);
 });
