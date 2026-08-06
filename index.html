@@ -1850,7 +1850,9 @@ Promise.all([store.get("bosses_teon2b"), store.get("settings")]).then(function (
   try { if (res[0]) loaded = JSON.parse(res[0]); } catch (e) {}
 
   if (loaded && loaded.length) {
-    bosses = loaded;
+    // 'Curl Test' was sync-API test data that briefly reached live rosters;
+    // merge never deletes, so purge it here on every device that caught it
+    bosses = loaded.filter(function (b) { return b.id !== "curl_test"; });
   } else {
     var now = Date.now();
     bosses = SEED.map(function (s, i) {
@@ -1967,7 +1969,7 @@ function applyRemote(remote) {
   bosses.forEach(function (b) { byId[b.id] = b; });
   var changed = false, needPush = false, remoteIds = {};
   remote.forEach(function (r) {
-    if (!r || !r.id) return;
+    if (!r || !r.id || r.id === "curl_test") return;
     remoteIds[r.id] = true;
     var l = byId[r.id];
     if (!l) {
