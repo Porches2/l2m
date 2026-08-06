@@ -23,11 +23,13 @@ function clean(raw) {
 async function readState() {
   try {
     const meta = await head(STATE_PATH);
-    const url = meta.downloadUrl || meta.url;
-    // the blob CDN caches for a minute; a unique query skips that so a GET
-    // right after a POST sees the fresh write
-    const sep = url.includes('?') ? '&' : '?';
-    const r = await fetch(url + sep + 'ts=' + Date.now(), { cache: 'no-store' });
+    // private-store URLs 403 on plain fetch; authenticate with the store
+    // token. The unique query skips the blob CDN's minute of caching so a
+    // GET right after a POST sees the fresh write.
+    const r = await fetch(meta.url + '?ts=' + Date.now(), {
+      headers: { authorization: 'Bearer ' + process.env.BLOB_READ_WRITE_TOKEN },
+      cache: 'no-store',
+    });
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -48,15 +50,17 @@ function merge(current, incoming) {
 }
 
 export default async function handler(req, res) {
-  const key = req.headers['x-guild-key'] || '';
-  if (!process.env.GUILD_KEY || key !== process.env.GUILD_KEY) {
-    return res.status(401).json({ error: 'wrong or missing guild key' });
-  }
-
+  // Reads are open: anyone with the link sees the live timers. Writes need
+  // the editor passcode, so only the members holding it can change anything.
   if (req.method === 'GET') {
     res.setHeader('Cache-Control', 'no-store');
     const state = await readState();
     return res.status(200).json(state || { bosses: [], updatedAt: 0 });
+  }
+
+  const key = req.headers['x-guild-key'] || '';
+  if (!process.env.GUILD_KEY || key !== process.env.GUILD_KEY) {
+    return res.status(401).json({ error: 'wrong or missing editor passcode' });
   }
 
   if (req.method === 'POST') {

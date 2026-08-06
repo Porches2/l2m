@@ -403,12 +403,13 @@ tr.row-check .track i,tr.row-overdue .track i{background:var(--overdue)}
     <label class="check"><input type="checkbox" id="sPopup" /> Show an in-page popup</label>
     <label class="check"><input type="checkbox" id="sDesktop" /> Show a desktop notification</label>
     <div class="field" style="margin-top:14px">
-      <label for="sSyncKey">Guild sync passcode</label>
+      <label for="sSyncKey">Editor passcode</label>
       <input type="text" id="sSyncKey" autocomplete="off" spellcheck="false"
-             placeholder="Empty = timers stay on this device only" />
+             placeholder="Empty = view only" />
     </div>
-    <p class="hint" style="margin:-6px 0 10px">Everyone who enters the same passcode shares one
-      set of timers — a Kill logged by one member updates the whole guild within seconds.</p>
+    <p class="hint" style="margin:-6px 0 10px">Everyone sees the guild's live timers automatically.
+      Entering the editor passcode lets this device update them — Kill, No spawn, Miss, and log
+      scans then reach the whole guild within seconds.</p>
     <div class="modal-acts">
       <button class="btn" id="sTest">Test sound</button>
       <button class="btn" data-close="settingsBackdrop">Close</button>
@@ -1882,9 +1883,10 @@ var SYNC_KEYS = ["name", "server", "cooldownHours", "description", "spawnChance"
 var syncPushTimer = null;
 var syncBusy = false;
 
-function syncEnabled() {
-  return !!(settings.syncKey && settings.syncKey.trim()) && location.protocol !== "file:";
-}
+// Everyone reads the shared timers; only holders of the editor passcode
+// can write them back.
+function syncCanRead() { return location.protocol !== "file:"; }
+function syncCanWrite() { return syncCanRead() && !!(settings.syncKey && settings.syncKey.trim()); }
 
 // updatedAt was briefly written as an ISO string; read both forms forever
 // so old saved rosters keep merging correctly.
@@ -1896,7 +1898,7 @@ function ts(v) {
 
 function setSyncPill(state, msg) {
   var el = document.getElementById("syncPill");
-  if (!syncEnabled()) { el.hidden = true; return; }
+  if (!syncCanRead()) { el.hidden = true; return; }
   el.hidden = false;
   el.className = "sync-pill" + (state ? " " + state : "");
   el.textContent = msg;
@@ -1944,22 +1946,21 @@ function applyRemote(remote) {
 }
 
 function pollState() {
-  if (!syncEnabled() || !bosses.length) return;
-  fetch("api/state", { headers: { "x-guild-key": settings.syncKey }, cache: "no-store" })
+  if (!syncCanRead() || !bosses.length) return;
+  fetch("api/state", { cache: "no-store" })
     .then(function (r) {
-      if (r.status === 401) throw new Error("Wrong passcode");
       if (!r.ok) throw new Error("Sync error (" + r.status + ")");
       return r.json();
     })
     .then(function (s) {
       applyRemote(s.bosses || []);
-      setSyncPill("ok", "guild sync on");
+      setSyncPill("ok", syncCanWrite() ? "live · editor" : "live · view only");
     })
     .catch(function (e) { setSyncPill("err", e.message || "sync error"); });
 }
 
 function pushState() {
-  if (!syncEnabled() || !bosses.length || syncBusy) return;
+  if (!syncCanWrite() || !bosses.length || syncBusy) return;
   syncBusy = true;
   fetch("api/state", {
     method: "POST",
@@ -1967,20 +1968,20 @@ function pushState() {
     body: JSON.stringify({ bosses: bosses.map(syncFields) })
   })
     .then(function (r) {
-      if (r.status === 401) throw new Error("Wrong passcode");
+      if (r.status === 401) throw new Error("Wrong editor passcode");
       if (!r.ok) throw new Error("Sync error (" + r.status + ")");
       return r.json();
     })
     .then(function (s) {
       syncBusy = false;
       applyRemote(s.bosses || []);
-      setSyncPill("ok", "guild sync on");
+      setSyncPill("ok", "live · editor");
     })
     .catch(function (e) { syncBusy = false; setSyncPill("err", e.message || "sync error"); });
 }
 
 function schedulePush() {
-  if (!syncEnabled()) return;
+  if (!syncCanWrite()) return;
   clearTimeout(syncPushTimer);
   syncPushTimer = setTimeout(pushState, 800);
 }
@@ -1993,7 +1994,7 @@ function syncNow() {
 
 setInterval(pollState, SYNC_POLL_MS);
 document.addEventListener("visibilitychange", function () { if (!document.hidden) pollState(); });
-setTimeout(function () { if (syncEnabled()) syncNow(); }, 2000);   // after boot has loaded bosses
+setTimeout(function () { if (syncCanRead()) syncNow(); }, 2000);   // after boot has loaded bosses
 
 });
 </script>
