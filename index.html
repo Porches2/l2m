@@ -1935,6 +1935,7 @@ Promise.all([store.get("bosses_teon2b"), store.get("settings")]).then(function (
    ========================================================================= */
 var pageVersionTag = null;
 function checkForNewVersion() {
+  if (document.hidden) return;   // idle background tabs shouldn't spend requests
   fetch(location.pathname, { method: "HEAD", cache: "no-store" }).then(function (r) {
     var tag = r.headers.get("etag") || r.headers.get("last-modified");
     if (!tag) return;
