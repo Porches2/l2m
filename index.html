@@ -1958,7 +1958,11 @@ window.__checkVersion = checkForNewVersion;
    from two phones can't erase each other. No passcode = local-only, exactly
    as before.
    ========================================================================= */
-var SYNC_POLL_MS = 10000;
+// 60s, and only while the tab is visible: background tabs left open all day
+// were burning a blob read every 10s each, which is what blew through
+// Vercel's free tier and got the account suspended. A kill still shows up
+// within a minute, and switching to the tab refreshes immediately.
+var SYNC_POLL_MS = 60000;
 var SYNC_KEYS = ["name", "server", "cooldownHours", "description", "spawnChance",
                  "important", "imageUrl", "active", "deathISO", "updatedAt"];
 var syncPushTimer = null;
@@ -2027,7 +2031,7 @@ function applyRemote(remote) {
 }
 
 function pollState() {
-  if (!syncCanRead() || !bosses.length) return;
+  if (!syncCanRead() || !bosses.length || document.hidden) return;
   fetch("api/state", { cache: "no-store" })
     .then(function (r) {
       if (!r.ok) throw new Error("Sync error (" + r.status + ")");

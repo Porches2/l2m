@@ -20,19 +20,30 @@ function clean(raw) {
   return out;
 }
 
+// Blob operations are metered and polling tabs add up, so warm instances
+// serve reads from memory for a few seconds and remember the blob URL
+// instead of paying a head() lookup on every request.
+let blobUrl = null;
+let cached = null; // { state, at }
+const CACHE_MS = 15000;
+
 async function readState() {
+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.state;
   try {
-    const meta = await head(STATE_PATH);
+    if (!blobUrl) blobUrl = (await head(STATE_PATH)).url;
     // private-store URLs 403 on plain fetch; authenticate with the store
     // token. The unique query skips the blob CDN's minute of caching so a
     // GET right after a POST sees the fresh write.
-    const r = await fetch(meta.url + '?ts=' + Date.now(), {
+    const r = await fetch(blobUrl + '?ts=' + Date.now(), {
       headers: { authorization: 'Bearer ' + process.env.BLOB_READ_WRITE_TOKEN },
       cache: 'no-store',
     });
-    if (!r.ok) return null;
-    return await r.json();
+    if (!r.ok) { blobUrl = null; return null; }
+    const state = await r.json();
+    cached = { state, at: Date.now() };
+    return state;
   } catch {
+    blobUrl = null;
     return null; // first ever request: no blob yet
   }
 }
@@ -80,6 +91,7 @@ export default async function handler(req, res) {
       contentType: 'application/json',
       cacheControlMaxAge: 60,
     });
+    cached = { state, at: Date.now() };
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json(state);
   }
